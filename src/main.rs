@@ -16,7 +16,6 @@ use rayon::iter::ParallelIterator;
 use std::ops::Add;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
-use std::thread;
 use vec::Vec3;
 
 const ASPECT_RATIO: f64 = 16.0 / 9.0;
@@ -342,8 +341,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let (tx, rx) = channel();
-    let handle = thread::spawn(move || {
-        (0..WIDTH * HEIGHT)
+    rayon::spawn(move || {
+        let _res = (0..WIDTH * HEIGHT)
             .into_par_iter()
             .map(|i| {
                 let x = i % WIDTH;
@@ -364,7 +363,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap();
                 (x, y, fragment_to_pixel(color, samples_per_pixel))
             })
-            .try_for_each_with(tx, move |tx, chunk| tx.send(chunk))
+            .try_for_each_with(tx, move |tx, chunk| tx.send(chunk));
     });
 
     while let Some(e) = window.next() {
@@ -382,10 +381,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             clear([1.0; 4], g);
             image(&texture, c.transform, g);
         });
-    }
-
-    if let Err(_) = handle.join() {
-        panic!("failed rendering");
     }
 
     Ok(())
