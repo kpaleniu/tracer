@@ -6,14 +6,11 @@ use glam::Vec3A as Vec3;
 use image::ImageBuffer;
 use image::Rgba;
 use piston_window::*;
-use rand::distributions::Distribution;
-use rand::distributions::Uniform;
+use rand::distributions::{Distribution, Uniform};
 use rand::Rng;
-use rayon::iter::IntoParallelIterator;
-use rayon::iter::ParallelIterator;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::ops::Add;
-use std::sync::mpsc::channel;
-use std::sync::Arc;
+use std::sync::{mpsc::channel, Arc};
 use std::time::Instant;
 
 const ASPECT_RATIO: f32 = 16.0 / 9.0;
