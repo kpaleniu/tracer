@@ -11,11 +11,12 @@ use piston_window::*;
 use rand::distributions::Distribution;
 use rand::distributions::Uniform;
 use rand::Rng;
-use std::sync::mpsc;
-use std::sync::mpsc::Sender;
+use rayon::iter::IntoParallelIterator;
+use rayon::iter::ParallelIterator;
+use std::ops::Add;
+use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::thread;
-use std::thread::JoinHandle;
 use vec::Vec3;
 
 const ASPECT_RATIO: f64 = 16.0 / 9.0;
@@ -276,58 +277,6 @@ fn raycast(r: &Ray, scene: &Scene, depth: u32) -> Vec3 {
     (1.0 - t) * Vec3(1.0, 1.0, 1.0) + t * Vec3(0.5, 0.7, 1.0)
 }
 
-struct ComputeContext {
-    handle: JoinHandle<()>,
-    cancel: Sender<()>,
-}
-
-fn compute<'a>(
-    range: &'a [u32],
-    camera: Arc<Camera>,
-    scene: Arc<Scene>,
-    samples_per_pixel: i32,
-    max_depth: u32,
-    color_tx: Sender<Vec<(u32, u32, Rgba<u8>)>>,
-) -> ComputeContext {
-    let (cancel_tx, cancel_rx) = mpsc::channel();
-    let range = range.to_owned();
-    let handle = thread::spawn(move || {
-        let mut rng = rand::thread_rng();
-
-        let mut line = Vec::<(u32, u32, Rgba<u8>)>::new();
-        for i in range {
-            let x = i % WIDTH;
-            let y = i / WIDTH;
-
-            let mut color = Vec3::default();
-            for _ in 0..samples_per_pixel {
-                let u = (rng.gen::<f64>() + x as f64) / (WIDTH - 1) as f64;
-                let v = (rng.gen::<f64>() + y as f64) / (HEIGHT - 1) as f64;
-                let ray = camera.ray(u, v);
-                color += raycast(&ray, &scene, max_depth);
-            }
-            line.push((x, y, fragment_to_pixel(color, samples_per_pixel)));
-
-            if cancel_rx.try_recv().is_ok() {
-                break;
-            }
-
-            if i % (20 * WIDTH) == 0 {
-                color_tx.send(line.clone()).unwrap();
-                line.clear();
-            }
-        }
-
-        if !line.is_empty() {
-            color_tx.send(line.clone()).unwrap();
-        }
-    });
-    ComputeContext {
-        handle,
-        cancel: cancel_tx,
-    }
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut frame_buffer = ImageBuffer::from_pixel(WIDTH, HEIGHT, image::Rgba([0, 0, 0, 255]));
 
@@ -339,8 +288,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let texture_settings = TextureSettings::new();
 
     let mut texture = Texture::from_image(&mut texture_context, &frame_buffer, &texture_settings)?;
-
-    let (color_tx, color_rx) = mpsc::channel();
 
     let camera = Arc::new(Camera::new(
         Vec3(-2.0, 2.0, 1.0),
@@ -393,28 +340,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         ],
     });
-    let mut contexts = Vec::new();
-    let full: Vec<_> = (0..WIDTH * HEIGHT).collect();
-    let chunk_size = (WIDTH * HEIGHT / 8).try_into().unwrap();
 
-    for chunk in full.chunks(chunk_size) {
-        let context = compute(
-            chunk,
-            camera.clone(),
-            scene.clone(),
-            samples_per_pixel,
-            max_depth,
-            color_tx.clone(),
-        );
-        contexts.push(context);
-    }
+    let (tx, rx) = channel();
+    let handle = thread::spawn(move || {
+        (0..WIDTH * HEIGHT)
+            .into_par_iter()
+            .map(|i| {
+                let x = i % WIDTH;
+                let y = i / WIDTH;
+
+                let color = (0..samples_per_pixel)
+                    .into_par_iter()
+                    .map_init(
+                        || rand::thread_rng(),
+                        |rng, _| {
+                            let u = (rng.gen::<f64>() + x as f64) / (WIDTH - 1) as f64;
+                            let v = (rng.gen::<f64>() + y as f64) / (HEIGHT - 1) as f64;
+                            let ray = camera.ray(u, v);
+                            raycast(&ray, &scene, max_depth)
+                        },
+                    )
+                    .reduce_with(Add::add)
+                    .unwrap();
+                (x, y, fragment_to_pixel(color, samples_per_pixel))
+            })
+            .try_for_each_with(tx, move |tx, chunk| tx.send(chunk))
+    });
 
     while let Some(e) = window.next() {
         window.draw_2d(&e, |c, g, device| {
-            if let Ok(line) = color_rx.try_recv() {
-                for (x, y, px) in line {
-                    frame_buffer.put_pixel(x, y, px);
-                }
+            let mut updated = false;
+            let mut iter = rx.try_iter();
+            while let Some((x, y, px)) = iter.next() {
+                frame_buffer.put_pixel(x, y, px);
+                updated = true;
+            }
+            if updated {
                 texture.update(&mut texture_context, &frame_buffer).unwrap();
                 texture_context.encoder.flush(device);
             }
@@ -423,9 +384,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    for context in contexts {
-        let _cancel = context.cancel.send(());
-        context.handle.join().unwrap();
+    if let Err(_) = handle.join() {
+        panic!("failed rendering");
     }
 
     Ok(())
