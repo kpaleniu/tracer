@@ -3,8 +3,7 @@ extern crate piston_window;
 
 use core::f32::consts::PI;
 use glam::Vec3A as Vec3;
-use image::ImageBuffer;
-use image::Rgba;
+use image::{ImageBuffer, Rgba};
 use piston_window::*;
 use rand::distributions::{Distribution, Uniform};
 use rand::Rng;
