@@ -16,6 +16,7 @@ use rayon::iter::ParallelIterator;
 use std::ops::Add;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
+use std::time::Instant;
 use vec::Vec3;
 
 const ASPECT_RATIO: f64 = 16.0 / 9.0;
@@ -288,6 +289,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut texture = Texture::from_image(&mut texture_context, &frame_buffer, &texture_settings)?;
 
+    let assets = find_folder::Search::ParentsThenKids(3, 3)
+        .for_folder("assets")
+        .unwrap();
+
+    let mut glyphs = window
+        .load_font(assets.join("FiraSans-Regular.ttf"))
+        .unwrap();
+
     let camera = Arc::new(Camera::new(
         Vec3(-2.0, 2.0, 1.0),
         Vec3(0.0, 0.0, -1.0),
@@ -342,12 +351,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (tx, rx) = channel();
     rayon::spawn(move || {
+        let now = Instant::now();
         let _res = (0..WIDTH * HEIGHT)
             .into_par_iter()
             .map(|i| {
                 let x = i % WIDTH;
                 let y = i / WIDTH;
-
                 let color = (0..samples_per_pixel)
                     .into_par_iter()
                     .map_init(
@@ -364,13 +373,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (x, y, fragment_to_pixel(color, samples_per_pixel))
             })
             .try_for_each_with(tx, move |tx, chunk| tx.send(chunk));
+        println!("took {}s", now.elapsed().as_secs());
     });
 
+    let mut show_frame_time = false;
     while let Some(e) = window.next() {
+        if let Some(Button::Keyboard(key)) = e.press_args() {
+            if key == Key::F {
+                show_frame_time = !show_frame_time;
+            }
+        };
+
         window.draw_2d(&e, |c, g, device| {
             let mut updated = false;
             let mut iter = rx.try_iter();
+            let now = Instant::now();
             while let Some((x, y, px)) = iter.next() {
+                if now.elapsed().as_millis() > 16 {
+                    break;
+                }
                 frame_buffer.put_pixel(x, y, px);
                 updated = true;
             }
@@ -380,6 +401,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             clear([1.0; 4], g);
             image(&texture, c.transform, g);
+
+            if show_frame_time {
+                let transform = c.transform.trans(10.0, 100.0);
+                let millis = format!("{} us", now.elapsed().as_micros());
+                text::Text::new_color([1.0, 1.0, 1.0, 1.0], 32)
+                    .draw(&millis, &mut glyphs, &c.draw_state, transform, g)
+                    .unwrap();
+
+                // Update glyphs before rendering.
+                glyphs.factory.encoder.flush(device);
+            }
         });
     }
 
